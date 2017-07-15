@@ -1,0 +1,14 @@
+[Unit]
+Description=RSCheck %i service
+
+[Service]
+Type=notify
+ExecStart=/usr/libexec/rscheck /etc/rscheck/%i.conf
+WatchdogSec=3
+Restart=on-failure
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
