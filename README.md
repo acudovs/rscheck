@@ -3,8 +3,8 @@
 RSCheck is a simple daemon for checking a Real Server health before adding it to
 a Load Balancing cluster.
 
-It is very dangerous to add misconfigured Real Server to a Load Balancing
-cluster especially when using least connection scheduler (lesser extent
+It is very dangerous to add misconfigured Real Server to a L4 Load Balancing
+cluster (eg. IPVS) especially when using least connection scheduler (lesser extent
 but still affects other schedulers). Missing virtual IP address or rp_filter
 enabled on a Real Server network interface leads to site downtime by directing
 all new connections to the misconfigured server.
