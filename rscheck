@@ -22,8 +22,8 @@ import yaml
 from pyroute2.netlink.rtnl.ifinfmsg import IFF_UP, IFF_RUNNING
 
 __author__ = 'Aleksey Chudov <aleksey.chudov@gmail.com>'
-__date__ = '15 Jul 2017'
-__version__ = '1.0.4'
+__date__ = '20 Sep 2017'
+__version__ = '1.0.5'
 
 
 class AbstractCheck(threading.Thread):
@@ -47,6 +47,18 @@ class AbstractCheck(threading.Thread):
 
     def update_status(self):
         raise NotImplementedError
+
+
+class CheckDefaultRoutes(AbstractCheck):
+    def update_status(self):
+        status = Status.OK
+        with pyroute2.iproute.IPRoute() as ip:
+            ip.get_timeout = self.timeout
+            if not ip.get_default_routes():
+                logging.error('no default route')
+                status = Status.ERROR
+
+        self.status.update(status)
 
 
 class CheckDNS(AbstractCheck):
