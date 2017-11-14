@@ -2,6 +2,7 @@
 
 import argparse
 import collections
+import contextlib
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ import urllib2
 import urlparse
 
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+from socket import AF_INET, SOCK_DGRAM
 from SocketServer import ThreadingMixIn
 
 import dns.resolver
@@ -22,17 +24,18 @@ import yaml
 from pyroute2.netlink.rtnl.ifinfmsg import IFF_UP, IFF_RUNNING
 
 __author__ = 'Aleksey Chudov <aleksey.chudov@gmail.com>'
-__date__ = '20 Sep 2017'
-__version__ = '1.0.5'
+__date__ = '14 Nov 2017'
+__version__ = '1.0.6'
 
 
 class AbstractCheck(threading.Thread):
-    def __init__(self, name, interval=3, timeout=1):
+    def __init__(self, name, status_message=False, interval=3, timeout=1):
         super(AbstractCheck, self).__init__(name=name)
         self.daemon = True
+        self.status = Report.check_status(name)
+        self.status_message = status_message
         self.interval = interval
         self.timeout = timeout
-        self.status = Report.check_status(name)
 
     def run(self):
         while self.is_alive():
@@ -180,12 +183,46 @@ class CheckTCP(AbstractCheck):
         self.status.update(status)
 
 
+class CheckUDPRequest(AbstractCheck):
+    def __init__(self, host, port, request, response,
+                 max_response_size=1024, **kwargs):
+        super(CheckUDPRequest, self).__init__(**kwargs)
+        self.host = host
+        self.port = port
+        self.request = request
+        self.response = response
+        self.max_response_size = max_response_size
+
+    def update_status(self):
+        status = Status.OK
+        message = ''
+        try:
+            with contextlib.closing(socket.socket(AF_INET, SOCK_DGRAM)) as sock:
+                sock.settimeout(self.timeout)
+                sock.connect((self.host, self.port))
+                sock.send(self.request)
+                response = sock.recv(self.max_response_size).rstrip()
+                if re.match(self.response, response):
+                    if self.status_message:
+                        message = response
+                else:
+                    logging.error("{}:{} response is '{}' not '{}'".format(
+                        self.host, self.port, response, self.response))
+                    status = Status.ERROR
+
+        except socket.error as e:
+            logging.error('request to {}:{} failed: {}'.format(
+                self.host, self.port, e))
+            status = Status.ERROR
+
+        self.status.update(status, message)
+
+
 class CheckURL(AbstractCheck):
-    def __init__(self, url, response, status_message=False, **kwargs):
+    def __init__(self, url, response, **kwargs):
         super(CheckURL, self).__init__(**kwargs)
         self.url = url
         self.response = response
-        self.status_message = status_message
 
     def update_status(self):
         status = Status.OK
