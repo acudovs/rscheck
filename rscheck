@@ -24,44 +24,60 @@ import yaml
 from pyroute2.netlink.rtnl.ifinfmsg import IFF_UP, IFF_RUNNING
 
 __author__ = 'Aleksey Chudov <aleksey.chudov@gmail.com>'
-__date__ = '14 Nov 2017'
-__version__ = '1.0.6'
+__date__ = '29 Jan 2018'
+__version__ = '1.0.7'
+
+
+class CheckError(Exception):
+    pass
 
 
 class AbstractCheck(threading.Thread):
-    def __init__(self, name, status_message=False, interval=3, timeout=1):
+    def __init__(self, name, interval=3, timeout=1,
+                 error_message=True, status_message=False):
         super(AbstractCheck, self).__init__(name=name)
+        self.__status = Report.check_status(name)
         self.daemon = True
-        self.status = Report.check_status(name)
-        self.status_message = status_message
         self.interval = interval
         self.timeout = timeout
+        self.error_message = error_message
+        self.status_message = status_message
 
     def run(self):
         while self.is_alive():
-            try:
-                self.update_status()
-            except Exception as e:
-                logging.error('unexpected error: {}'.format(e))
-                self.status.update(Status.ERROR)
+            error = Status.OK
+            message = ''
 
-            logging.debug(self.status)
+            try:
+                result = self.check_status()
+                if self.status_message and result:
+                    message = str(result)
+
+            except Exception as e:
+                error = Status.ERROR
+                logging.error('{}: {}'.format(e.__class__.__name__, e))
+                if self.error_message:
+                    message = '{} error: {}'.format(self.name, e)
+
+            self.__status.update(error, message)
+            logging.debug(self.__status)
             time.sleep(self.interval)
 
-    def update_status(self):
+    def check_status(self):
         raise NotImplementedError
 
 
 class CheckDefaultRoutes(AbstractCheck):
-    def update_status(self):
-        status = Status.OK
+    def check_status(self):
         with pyroute2.iproute.IPRoute() as ip:
             ip.get_timeout = self.timeout
-            if not ip.get_default_routes():
-                logging.error('no default route')
-                status = Status.ERROR
+            default_routes = ip.get_default_routes()
 
-        self.status.update(status)
+        if not default_routes:
+            raise CheckError('no default route')
+
+        if self.status_message:
+            return ','.join(default_routes)
 
 
 class CheckDNS(AbstractCheck):
@@ -75,17 +91,16 @@ class CheckDNS(AbstractCheck):
         self.qtype = qtype
         self.tcp = tcp
 
-    def update_status(self):
-        status = Status.OK
+    def check_status(self):
         try:
-            self.resolver.query(self.qname, self.qtype, tcp=self.tcp)
+            answer = self.resolver.query(self.qname, self.qtype, tcp=self.tcp)
+            if self.status_message:
+                return ','.join(str(rrset) for rrset in answer.rrset)
+
         except dns.exception.DNSException as e:
-            logging.error("DNS query '{} {}' to {}:{} failed: {}".format(
+            raise CheckError('DNS query "{} {}" to {}:{} failed: {}'.format(
                 self.qname, self.qtype, self.resolver.nameservers[0],
                 self.resolver.port, e))
-            status = Status.ERROR
-
-        self.status.update(status)
 
 
 class CheckInterfaces(AbstractCheck):
@@ -115,24 +130,17 @@ class CheckInterfaces(AbstractCheck):
 
         return if_names
 
-    def update_status(self):
-        status = Status.OK
+    def check_status(self):
         interfaces_info = self.interfaces_info(self.timeout)
-
         for name in self.interfaces:
             if name not in interfaces_info:
-                logging.error("interface '{}' does not exist".format(name))
-                status = Status.ERROR
+                raise CheckError('interface "{}" does not exist'.format(name))
 
             elif not interfaces_info[name]['flags'] & (IFF_UP | IFF_RUNNING):
-                logging.error("interface '{}' is not UP".format(name))
-                status = Status.ERROR
+                raise CheckError('interface "{}" is not UP'.format(name))
 
             elif not interfaces_info[name]['address']:
-                logging.error("interface '{}' address not set".format(name))
-                status = Status.ERROR
-
-        self.status.update(status)
+                raise CheckError('interface "{}" address not set'.format(name))
 
 
 class CheckSysctl(AbstractCheck):
@@ -148,20 +156,16 @@ class CheckSysctl(AbstractCheck):
             with open(sysctl_path) as sysctl_file:
                 sysctl_value = sysctl_file.read().strip()
         except IOError as e:
-            logging.debug('error reading {}: {}'.format(variable, e))
+            logging.error('error reading {}: {}'.format(variable, e))
 
         return sysctl_value
 
-    def update_status(self):
-        status = Status.OK
+    def check_status(self):
         for variable, value in self.variables.items():
             sysctl_value = self.sysctl_read(variable)
             if sysctl_value != str(value):
-                logging.error("{} value is '{}' not '{}'".format(
+                raise CheckError('{} value is "{}" not "{}"'.format(
                     variable, sysctl_value, value))
-                status = Status.ERROR
-
-        self.status.update(status)
 
 
 class CheckTCP(AbstractCheck):
@@ -170,17 +174,13 @@ class CheckTCP(AbstractCheck):
         self.host = host
         self.port = port
 
-    def update_status(self):
-        status = Status.OK
+    def check_status(self):
         try:
             socket.create_connection(
                 (self.host, self.port), self.timeout).close()
         except socket.error as e:
-            logging.error('connection to {}:{} failed: {}'.format(
+            raise CheckError('connection to {}:{} failed: {}'.format(
                 self.host, self.port, e))
-            status = Status.ERROR
-
-        self.status.update(status)
 
 
 class CheckUDPRequest(AbstractCheck):
@@ -193,9 +193,7 @@ class CheckUDPRequest(AbstractCheck):
         self.response = response
         self.max_response_size = max_response_size
 
-    def update_status(self):
-        status = Status.OK
-        message = ''
+    def check_status(self):
         try:
             with contextlib.closing(socket.socket(AF_INET, SOCK_DGRAM)) as sock:
                 sock.settimeout(self.timeout)
@@ -204,18 +202,14 @@ class CheckUDPRequest(AbstractCheck):
                 response = sock.recv(self.max_response_size).rstrip()
                 if re.match(self.response, response):
                     if self.status_message:
-                        message = response
+                        return response
                 else:
-                    logging.error("{}:{} response is '{}' not '{}'".format(
+                    raise CheckError('{}:{} response is "{}" not "{}"'.format(
                         self.host, self.port, response, self.response))
-                    status = Status.ERROR
 
         except socket.error as e:
-            logging.error('request to {}:{} failed: {}'.format(
+            raise CheckError('request to {}:{} failed: {}'.format(
                 self.host, self.port, e))
-            status = Status.ERROR
-
-        self.status.update(status, message)
 
 
 class CheckURL(AbstractCheck):
@@ -224,96 +218,88 @@ class CheckURL(AbstractCheck):
         self.url = url
         self.response = response
 
-    def update_status(self):
-        status = Status.OK
-        message = ''
+    def check_status(self):
         try:
             r = urllib2.urlopen(self.url, timeout=self.timeout)
             response = r.read().strip()
             if re.match(self.response, response):
                 if self.status_message:
-                    message = response
+                    return response
             else:
-                logging.error("{} response is '{}' not '{}'".format(
+                raise CheckError('{} response is "{}" not "{}"'.format(
                     self.url, response, self.response))
-                status = Status.ERROR
 
         except (socket.error, urllib2.URLError) as e:
-            logging.error('{} {}'.format(self.url, e))
-            status = Status.ERROR
-
-        self.status.update(status, message)
+            raise CheckError('{} {}'.format(self.url, e))
 
 
 class CheckQuery(object):
     def __init__(self, checks, query, config):
+        self.__status = Report.query_status(query)
         self.checks = checks
         self.query = query
         self.config = config
-        self.status = Report.query_status(self.query)
 
     def check_virtual_interface(self):
         name = self.checks.get('virtual_if')
         addresses = self.checks.get('virtual_ip')
-        if not name and addresses or name and not addresses:
-            logging.error(
-                "both 'virtual_if' and 'virtual_ip' parameters are required")
-            return Status.ERROR
 
-        status = Status.OK
+        if not name and addresses or name and not addresses:
+            raise CheckError('both "virtual_if" and "virtual_ip" parameters required')
+
         interfaces_info = CheckInterfaces.interfaces_info(
             self.config.query_timeout)
 
         if name not in interfaces_info:
-            logging.error("interface '{}' does not exist".format(name))
-            status = Status.ERROR
+            raise CheckError('interface "{}" does not exist'.format(name))
 
         elif not interfaces_info[name]['flags'] & (IFF_UP | IFF_RUNNING):
-            logging.error("interface '{}' is not UP".format(name))
-            status = Status.ERROR
+            raise CheckError('interface "{}" is not UP'.format(name))
 
         elif (CheckSysctl.sysctl_read(
                 'net.ipv4.conf.{}.rp_filter'.format(name)) != '0'):
-            logging.error("interface '{}' rp_filter not disabled".format(name))
-            status = Status.ERROR
+            raise CheckError(
+                'interface "{}" rp_filter not disabled'.format(name))
+
         else:
             for address in addresses.split(','):
                 if address not in interfaces_info[name]['address']:
-                    logging.error("interface '{}' address '{}' not set".format(
-                        name, address))
-                    status = Status.ERROR
-
-        return status
+                    raise CheckError(
+                        'interface "{}" address "{}" not set'.format(
+                            name, address))
 
     def query_status(self):
-        status = Status.OK
         for check in self.checks:
             if check in ('exclude', 'virtual_ip'):
                 continue
 
             if check == 'virtual_if':
-                status = self.check_virtual_interface()
+                self.check_virtual_interface()
             else:
-                logging.error("invalid check '{}'".format(check))
-                status = Status.ERROR
-
-        return status
+                raise CheckError('invalid check "{}"'.format(check))
 
     def update_status(self):
-        if not self.status.is_expired(self.config.query_cache_ttl):
-            logging.debug('cached {}'.format(self.status))
+        if not self.__status.is_expired(self.config.query_cache_ttl):
+            logging.debug('cached {}'.format(self.__status))
             return
 
-        try:
-            self.status.update(self.query_status())
-        except Exception as e:
-            logging.error('unexpected error: {}'.format(e))
-            self.status.update(Status.ERROR)
+        error = Status.OK
+        message = ''
 
-        logging.debug('updated {}'.format(self.status))
+        try:
+            self.query_status()
+        except Exception as e:
+            error = Status.ERROR
+            logging.error('{}: {}'.format(e.__class__.__name__, e))
+            if self.config.error_message:
+                message = 'query error: {}'.format(e)
+
+        self.__status.update(error, message)
+        logging.debug('updated {}'.format(self.__status))
 
 
 class HTTPRequestHandler(BaseHTTPRequestHandler, object):
+    error_message_format = '%(message)s'
     protocol_version = 'HTTP/1.1'
     server_version = 'RSCheck/' + __version__
     rbufsize = -1
@@ -331,54 +317,59 @@ class HTTPRequestHandler(BaseHTTPRequestHandler, object):
     def do_HEAD(self):
         self.handle_request()
 
-    def checks_exclude(self):
-        if 'exclude' in self.checks:
-            return self.checks['exclude'].split(',')
-        else:
-            return ()
-
     def handle_request(self):
         self.location, self.query = urlparse.urlsplit(self.path)[2:4]
 
         if self.location != self.server.config.location:
-            logging.error("invalid location '{}'".format(self.location))
-            self.send_error(404)
+            message = 'invalid location "{}"'.format(self.location)
+            logging.error(message)
+            self.send_error(404, message)
 
         elif self.query and not self.check_query():
-            logging.error("invalid query '{}'".format(self.query))
-            self.send_error(400)
+            message = 'invalid query "{}"'.format(self.query)
+            logging.error(message)
+            self.send_error(400, message)
 
         elif self.command == 'GET':
             message = Report.message(self.query, self.checks_exclude())
-            logging.debug("message='{}'".format(message))
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            if self.server.config.keep_alive:
-                self.send_header('Content-Length', len(message))
-            else:
-                self.send_header('Connection', 'close')
-            self.end_headers()
-            self.wfile.write(message)
+            logging.debug('message="{}"'.format(message))
+            self.send_message(200, message)
 
         elif self.command == 'HEAD':
             if Report.is_ok(self.query, self.checks_exclude()):
-                self.send_response(200)
+                self.send_message(200)
             else:
-                self.send_response(503)
-            if self.server.config.keep_alive:
-                self.send_header('Content-Length', 0)
-            else:
-                self.send_header('Connection', 'close')
-            self.end_headers()
+                self.send_message(503)
+
+    def send_message(self, code, message=''):
+        self.send_response(code)
+
+        if message:
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+
+        if self.server.config.keep_alive:
+            self.send_header('Content-Length', len(message))
+        else:
+            self.send_header('Connection', 'close')
+
+        self.end_headers()
+
+        if message:
+            self.wfile.write(message)
+
+    def checks_exclude(self, key='exclude'):
+        return self.checks[key].split(',') if key in self.checks else ()
 
     def check_query(self):
         for check in urlparse.unquote(self.query).split('&'):
             check_args = check.split('=')
             if len(check_args) != 2:
                 return False
+
             self.checks[check_args[0]] = check_args[1]
 
         CheckQuery(self.checks, self.query, self.server.config).update_status()
+
         return True
 
 
@@ -394,7 +385,8 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 class HTTPServerThread(threading.Thread):
     def __init__(self, name, address, port, location, keep_alive=True,
                  request_timeout=3, query_cache_ttl=5, query_timeout=1,
-                 wait_status_interval=3, wait_status_timeout=0):
+                 wait_status_interval=3, wait_status_timeout=0,
+                 error_message=True):
         super(HTTPServerThread, self).__init__(name=name)
         self.daemon = True
         self.address = address
@@ -404,7 +396,8 @@ class HTTPServerThread(threading.Thread):
         self.wait_status_timeout = wait_status_timeout
         self.config = Config(
             location=location, keep_alive=keep_alive,
-            query_cache_ttl=query_cache_ttl, query_timeout=query_timeout)
+            query_cache_ttl=query_cache_ttl, query_timeout=query_timeout,
+            error_message=error_message)
 
     def run(self):
         HTTPRequestHandler.timeout = self.request_timeout
@@ -429,9 +422,8 @@ class HTTPServerThread(threading.Thread):
 
 
 class MaintenanceThread(AbstractCheck):
-    def update_status(self):
+    def check_status(self):
         Report.clean_query_cache()
-        self.status.update(Status.OK)
 
 
 class Status(object):
@@ -444,13 +436,14 @@ class Status(object):
         self.timestamp = 0
 
     def __str__(self):
-        return "{}(error={}, message='{}', timestamp={})".format(
-            self.__class__.__name__, self.error, self.message, self.timestamp)
+        return '{}(error={}, message={}, timestamp={})'.format(
+            self.__class__.__name__, self.error,
+            repr(self.message), self.timestamp)
 
     def is_expired(self, ttl):
         return time.time() - self.timestamp > ttl
 
-    def update(self, error, message=''):
+    def update(self, error, message):
         self.error = error
         self.message = message
         self.timestamp = time.time()
@@ -467,7 +460,7 @@ class Report(object):
         logging.debug('query cache size: {}'.format(len(cls.query_cache)))
         for query in list(cls.query_cache):
             if cls.query_cache[query].is_expired(cls.query_cache_ttl):
-                logging.debug("query cache expired: '{}'".format(query))
+                logging.debug('query cache expired: "{}"'.format(query))
                 del cls.query_cache[query]
 
     @classmethod
@@ -493,16 +486,24 @@ class Report(object):
 
     @classmethod
     def message(cls, query='', exclude=()):
-        status = Status.OK if cls.is_query_ok(query) else Status.ERROR
+        status = Status.OK
         messages = collections.defaultdict(list)
 
+        if query in cls.query_cache:
+            if cls.query_cache[query].error:
+                status = Status.ERROR
+
+            if cls.query_cache[query].message:
+                messages[cls.query_cache[query].error].append(
+                    cls.query_cache[query].message)
+
         for name in cls.check_cache.viewkeys() - exclude:
+            if cls.check_cache[name].error:
+                status = Status.ERROR
+
             if cls.check_cache[name].message:
                 messages[cls.check_cache[name].error].append(
                     cls.check_cache[name].message)
-
-            if cls.check_cache[name].error:
-                status = Status.ERROR
 
         if status in messages:
             return '; '.join(messages[status])
