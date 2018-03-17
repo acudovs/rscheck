@@ -34,7 +34,7 @@ rpmbuild -bb rscheck.spec
 ```shell
 yum -y update
 yum -y install epel-release
-yum -y install rscheck
+yum -y install --setopt=tsflags= rscheck
 
 cp /usr/share/doc/rscheck*/rscheck.conf /etc/rscheck/primary-site.conf
 vi /etc/rscheck/primary-site.conf
