@@ -77,7 +77,8 @@ class CheckDefaultRoutes(AbstractCheck):
             raise CheckError('no default route')
 
         if self.status_message:
-            return ','.join(default_routes)
+            return ','.join(dict(route['attrs'])['RTA_GATEWAY']
+                            for route in default_routes)
 
 
 class CheckDNS(AbstractCheck):
