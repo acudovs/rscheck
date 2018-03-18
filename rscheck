@@ -246,7 +246,8 @@ class CheckQuery(object):
         addresses = self.checks.get('virtual_ip')
 
         if not name and addresses or name and not addresses:
-            raise CheckError('both "virtual_if" and "virtual_ip" parameters required')
+            raise CheckError(
+                'both "virtual_if" and "virtual_ip" parameters required')
 
         interfaces_info = CheckInterfaces.interfaces_info(
             self.config.query_timeout)
