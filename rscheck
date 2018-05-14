@@ -2,18 +2,19 @@
 
 import argparse
 import collections
-import contextlib
 import logging
 import os
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib2
 import urlparse
 
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
-from socket import AF_INET, SOCK_DGRAM
+from contextlib import closing
+from socket import AF_INET, SOCK_DGRAM, SOCK_STREAM
 from SocketServer import ThreadingMixIn
 
 import dns.resolver
@@ -24,8 +25,8 @@ import yaml
 from pyroute2.netlink.rtnl.ifinfmsg import IFF_UP, IFF_RUNNING
 
 __author__ = 'Aleksey Chudov <aleksey.chudov@gmail.com>'
-__date__ = '29 Jan 2018'
-__version__ = '1.0.7'
+__date__ = '14 May 2018'
+__version__ = '1.0.8'
 
 
 class CheckError(Exception):
@@ -170,15 +171,22 @@ class CheckSysctl(AbstractCheck):
 
 
 class CheckTCP(AbstractCheck):
-    def __init__(self, host, port, **kwargs):
+    def __init__(self, host, port, use_ssl=False, **kwargs):
         super(CheckTCP, self).__init__(**kwargs)
         self.host = host
         self.port = port
+        self.use_ssl = use_ssl
 
     def check_status(self):
         try:
-            socket.create_connection(
-                (self.host, self.port), self.timeout).close()
+            with closing(socket.socket(AF_INET, SOCK_STREAM)) as sock:
+                sock.settimeout(self.timeout)
+                if self.use_ssl:
+                    with closing(ssl.wrap_socket(sock)) as ssl_sock:
+                        ssl_sock.connect((self.host, self.port))
+                else:
+                    sock.connect((self.host, self.port))
+
         except socket.error as e:
             raise CheckError('connection to {}:{} failed: {}'.format(
                 self.host, self.port, e))
@@ -196,7 +204,7 @@ class CheckUDPRequest(AbstractCheck):
 
     def check_status(self):
         try:
-            with contextlib.closing(socket.socket(AF_INET, SOCK_DGRAM)) as sock:
+            with closing(socket.socket(AF_INET, SOCK_DGRAM)) as sock:
                 sock.settimeout(self.timeout)
                 sock.connect((self.host, self.port))
                 sock.send(self.request)
